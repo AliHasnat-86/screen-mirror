@@ -11,7 +11,7 @@
   MP4 straight into Media Source Extensions and keeps playback pinned about half a
   second behind the newest frame, instead of the several seconds a media player buffers.
 
-  For testing in a desktop browser, open receiver.html?src=http://<phone>:8080/live.mp4
+  For testing in a desktop browser, open receiver.html?src=http://<phone>:8080/live.mp4&lag=0.1&stats
 -->
 <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
 <style>
@@ -34,12 +34,20 @@
 <script>
 const NAMESPACE = 'urn:x-cast:com.screenmirror';
 
-// Playback stays between these distances (seconds) behind the newest buffered frame.
-// Segments arrive every 0.5 s, so the floor must stay above that or playback stalls.
-const TARGET_LAG = 0.6;   // where a jump lands
-const SPEEDUP_LAG = 1.1;  // above this, play slightly fast to catch up
-const JUMP_LAG = 2.0;     // above this, jump straight to TARGET_LAG
-const KEEP_BEHIND = 4;    // seconds of already-played video kept in the buffer
+// Playback stays this far (seconds) behind the newest buffered frame. The sender picks it in
+// START as "lag": a per-frame stream can sit at about 0.1 s, a stream of half-second segments
+// needs 0.6 s or it stalls between segments. The other thresholds scale from it.
+const DEFAULT_LAG = 0.6;
+let targetLag = DEFAULT_LAG;  // where a jump lands
+let speedupLag = 1.1;         // above this, play slightly fast to catch up
+let jumpLag = 2.0;            // above this, jump straight to targetLag
+const KEEP_BEHIND = 4;        // seconds of already-played video kept in the buffer
+
+function setLag(lag) {
+  targetLag = lag > 0 && lag < 5 ? lag : DEFAULT_LAG;
+  speedupLag = targetLag + Math.max(0.08, targetLag * 0.6);
+  jumpLag = targetLag + Math.max(0.6, targetLag * 2.3);
+}
 
 const video = document.getElementById('video');
 const message = document.getElementById('message');
@@ -49,6 +57,14 @@ if (params.has('stats')) stats.style.display = 'block';
 
 let session = 0;
 let current = null; // { id, reader, mediaSource, sourceBuffer, queue }
+let context = null;
+let reportedPlaying = false;
+
+// Tells connected senders what the player is doing: CONNECTING, PLAYING or RECONNECTING.
+function report(state) {
+  if (!context) return;
+  try { context.sendCustomMessage(NAMESPACE, undefined, { type: 'STATE', state }); } catch (e) {}
+}
 
 function show(text) {
   message.textContent = text;
@@ -86,7 +102,9 @@ function stop() {
 async function start(url) {
   stop();
   const id = session;
+  reportedPlaying = false;
   show('Connecting to iPhone…');
+  report('CONNECTING');
 
   try {
     const response = await fetch(url, { cache: 'no-store' });
@@ -114,8 +132,14 @@ async function start(url) {
     const queue = [head];
     current = { id, reader, mediaSource, sourceBuffer, queue };
 
+    let lastTrim = 0;
     const pump = () => {
-      if (id !== session || sourceBuffer.updating || !queue.length) return;
+      if (id !== session || sourceBuffer.updating) return;
+      // Frames arrive ~30 times a second, so the buffer is rarely idle: trim in the gaps.
+      if (!queue.length) {
+        if (performance.now() - lastTrim > 2000) { lastTrim = performance.now(); trim(false); }
+        return;
+      }
       const chunk = queue.shift();
       try {
         sourceBuffer.appendBuffer(chunk);
@@ -146,6 +170,8 @@ async function start(url) {
 function retry(url, reason) {
   const id = session;
   show('Reconnecting… (' + reason + ')');
+  reportedPlaying = false;
+  report('RECONNECTING');
   setTimeout(() => { if (id === session) start(url); }, 1000);
 }
 
@@ -168,28 +194,32 @@ setInterval(() => {
   const lastStart = buffered.start(buffered.length - 1);
   let lag = end - video.currentTime;
 
-  if (video.currentTime < lastStart || lag > JUMP_LAG) {
-    video.currentTime = Math.max(lastStart, end - TARGET_LAG);
+  if (video.currentTime < lastStart || lag > jumpLag) {
+    video.currentTime = Math.max(lastStart, end - targetLag);
     lag = end - video.currentTime;
   }
-  const rate = lag > SPEEDUP_LAG ? 1.1 : 1.0;
+  const rate = lag > speedupLag ? 1.1 : 1.0;
   if (video.playbackRate !== rate) video.playbackRate = rate;
   if (video.paused) video.play().catch(() => {});
-  if (video.currentTime > 0 && message.style.display !== 'none') show('');
+  if (video.currentTime > 0 && !video.paused && !reportedPlaying) {
+    reportedPlaying = true;
+    show('');
+    report('PLAYING');
+  }
 
   stats.textContent = 'lag ' + lag.toFixed(2) + 's  rate ' + rate.toFixed(2) +
     '  buf ' + (end - buffered.start(0)).toFixed(1) + 's';
-}, 100);
+}, 50);
 
-setInterval(() => trim(false), 2000);
 
 if (params.has('src')) {
+  setLag(parseFloat(params.get('lag')));
   start(params.get('src'));
 } else if (window.cast && cast.framework) {
-  const context = cast.framework.CastReceiverContext.getInstance();
+  context = cast.framework.CastReceiverContext.getInstance();
   context.addCustomMessageListener(NAMESPACE, (event) => {
     const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
-    if (data.type === 'START' && data.url) start(data.url);
+    if (data.type === 'START' && data.url) { setLag(parseFloat(data.lag)); start(data.url); }
     if (data.type === 'STOP') { stop(); show('Waiting for iPhone…'); }
   });
   const options = new cast.framework.CastReceiverOptions();
