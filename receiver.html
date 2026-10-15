@@ -1,0 +1,203 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Screen Mirror</title>
+<!--
+  Screen Mirror custom Cast receiver.
+
+  The iPhone sends {"type":"START","url":"http://<phone>:8080/live.mp4"} on the
+  urn:x-cast:com.screenmirror namespace. This page streams that endless fragmented
+  MP4 straight into Media Source Extensions and keeps playback pinned about half a
+  second behind the newest frame, instead of the several seconds a media player buffers.
+
+  For testing in a desktop browser, open receiver.html?src=http://<phone>:8080/live.mp4
+-->
+<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+  #message {
+    position: absolute; left: 0; right: 0; bottom: 64px;
+    text-align: center; color: #9a9a9a; font: 28px/1.4 system-ui, sans-serif;
+  }
+  #stats {
+    position: absolute; top: 16px; right: 24px; color: #6f6;
+    font: 16px monospace; display: none;
+  }
+</style>
+</head>
+<body>
+<video id="video" muted autoplay playsinline></video>
+<div id="message">Waiting for iPhone…</div>
+<div id="stats"></div>
+<script>
+const NAMESPACE = 'urn:x-cast:com.screenmirror';
+
+// Playback stays between these distances (seconds) behind the newest buffered frame.
+// Segments arrive every 0.5 s, so the floor must stay above that or playback stalls.
+const TARGET_LAG = 0.6;   // where a jump lands
+const SPEEDUP_LAG = 1.1;  // above this, play slightly fast to catch up
+const JUMP_LAG = 2.0;     // above this, jump straight to TARGET_LAG
+const KEEP_BEHIND = 4;    // seconds of already-played video kept in the buffer
+
+const video = document.getElementById('video');
+const message = document.getElementById('message');
+const stats = document.getElementById('stats');
+const params = new URLSearchParams(location.search);
+if (params.has('stats')) stats.style.display = 'block';
+
+let session = 0;
+let current = null; // { id, reader, mediaSource, sourceBuffer, queue }
+
+function show(text) {
+  message.textContent = text;
+  message.style.display = text ? 'block' : 'none';
+}
+
+function concat(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+// Reads the H.264 codec string ("avc1.PPCCLL") from the avcC box of the init segment.
+function codecFrom(bytes) {
+  for (let i = 0; i + 8 < bytes.length; i++) {
+    if (bytes[i] === 0x61 && bytes[i + 1] === 0x76 && bytes[i + 2] === 0x63 && bytes[i + 3] === 0x43) {
+      const hex = (n) => n.toString(16).padStart(2, '0').toUpperCase();
+      return 'avc1.' + hex(bytes[i + 5]) + hex(bytes[i + 6]) + hex(bytes[i + 7]);
+    }
+  }
+  return null;
+}
+
+function stop() {
+  session++;
+  if (current) {
+    try { current.reader.cancel(); } catch (e) {}
+    current = null;
+  }
+  video.removeAttribute('src');
+  video.load();
+}
+
+async function start(url) {
+  stop();
+  const id = session;
+  show('Connecting to iPhone…');
+
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const reader = response.body.getReader();
+
+    // Read until the init segment has told us the codec.
+    let head = new Uint8Array(0);
+    let codec = null;
+    while (!codec) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error('stream ended');
+      head = concat(head, value);
+      codec = codecFrom(head) || (head.length > 65536 ? 'avc1.64001F' : null);
+    }
+    if (id !== session) return reader.cancel();
+
+    const mediaSource = new MediaSource();
+    video.src = URL.createObjectURL(mediaSource);
+    await new Promise((resolve) => mediaSource.addEventListener('sourceopen', resolve, { once: true }));
+    if (id !== session) return reader.cancel();
+
+    const sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="' + codec + '"');
+    sourceBuffer.mode = 'segments';
+    const queue = [head];
+    current = { id, reader, mediaSource, sourceBuffer, queue };
+
+    const pump = () => {
+      if (id !== session || sourceBuffer.updating || !queue.length) return;
+      const chunk = queue.shift();
+      try {
+        sourceBuffer.appendBuffer(chunk);
+      } catch (e) {
+        if (e.name === 'QuotaExceededError') {
+          queue.unshift(chunk);
+          trim(true);
+        } else {
+          throw e;
+        }
+      }
+    };
+    sourceBuffer.addEventListener('updateend', pump);
+    pump();
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done || id !== session) break;
+      queue.push(value);
+      pump();
+    }
+    if (id === session) retry(url, 'Stream ended');
+  } catch (e) {
+    if (id === session) retry(url, e.message || String(e));
+  }
+}
+
+function retry(url, reason) {
+  const id = session;
+  show('Reconnecting… (' + reason + ')');
+  setTimeout(() => { if (id === session) start(url); }, 1000);
+}
+
+// Drops video that has already been played so the buffer stays small on the TV.
+function trim(force) {
+  const sb = current && current.sourceBuffer;
+  if (!sb || sb.updating || !video.buffered.length) return;
+  const start = video.buffered.start(0);
+  const cutoff = video.currentTime - (force ? 1 : KEEP_BEHIND);
+  if (cutoff > start + 1) {
+    try { sb.remove(start, cutoff); } catch (e) {}
+  }
+}
+
+// Keeps playback just behind the newest frame.
+setInterval(() => {
+  const buffered = video.buffered;
+  if (!buffered.length) return;
+  const end = buffered.end(buffered.length - 1);
+  const lastStart = buffered.start(buffered.length - 1);
+  let lag = end - video.currentTime;
+
+  if (video.currentTime < lastStart || lag > JUMP_LAG) {
+    video.currentTime = Math.max(lastStart, end - TARGET_LAG);
+    lag = end - video.currentTime;
+  }
+  const rate = lag > SPEEDUP_LAG ? 1.1 : 1.0;
+  if (video.playbackRate !== rate) video.playbackRate = rate;
+  if (video.paused) video.play().catch(() => {});
+  if (video.currentTime > 0 && message.style.display !== 'none') show('');
+
+  stats.textContent = 'lag ' + lag.toFixed(2) + 's  rate ' + rate.toFixed(2) +
+    '  buf ' + (end - buffered.start(0)).toFixed(1) + 's';
+}, 100);
+
+setInterval(() => trim(false), 2000);
+
+if (params.has('src')) {
+  start(params.get('src'));
+} else if (window.cast && cast.framework) {
+  const context = cast.framework.CastReceiverContext.getInstance();
+  context.addCustomMessageListener(NAMESPACE, (event) => {
+    const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+    if (data.type === 'START' && data.url) start(data.url);
+    if (data.type === 'STOP') { stop(); show('Waiting for iPhone…'); }
+  });
+  const options = new cast.framework.CastReceiverOptions();
+  options.disableIdleTimeout = true;
+  options.skipPlayersLoad = true;
+  options.customNamespaces = { [NAMESPACE]: cast.framework.system.MessageType.JSON };
+  context.start(options);
+}
+</script>
+</body>
+</html>
