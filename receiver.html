@@ -54,7 +54,13 @@
 
   /* ---------- Media (cast-media-player) ---------- */
   #media { background: #000; }
-  cast-media-player { position: absolute; inset: 0; --background-color: #000; --theme-hue: 210; --progress-color: var(--accent); --font-family: var(--font); }
+  cast-media-player { position: absolute; inset: 0; --background-color: #000; --theme-hue: 210; --progress-color: var(--accent); --font-family: var(--font);
+                      --splash-image: none; --logo-image: none; --background-image: none; }
+  /* Shown while a new video loads, so rapid switching never reveals an idle / ready page */
+  #mediaLoading { position: absolute; inset: 0; z-index: 4; background: #000; display: none;
+                  flex-direction: column; align-items: center; justify-content: center; gap: 28px; }
+  #mediaLoading.shown { display: flex; }
+  #mediaLoading .label { font-size: 28px; color: var(--muted); }
 
   /* ---------- Photo ---------- */
   #photo { background: #000; overflow: hidden; }
@@ -138,6 +144,7 @@
 <!-- Photos / videos / audio (Cast media player) -->
 <div id="media" class="layer">
   <cast-media-player id="player"></cast-media-player>
+  <div id="mediaLoading"><div class="spinner"></div><div class="label">Loading…</div></div>
   <div id="videoTop"><div id="videoTitle"></div><div class="brand">Universal Remote</div></div>
 </div>
 
@@ -378,9 +385,12 @@ const webTitle = document.getElementById('webTitle');
 const webLoading = document.getElementById('webLoading');
 const webHint = document.getElementById('webHint');
 const clock = document.getElementById('clock');
+const mediaLoading = document.getElementById('mediaLoading');
+function setMediaLoading(on) { mediaLoading.classList.toggle('shown', on); }
 
 let mode = 'idle';
 let mediaKind = null;      // 'photo' | 'audio' | 'video'
+let loadCount = 0;         // increases with every LOAD; stale events from older media are ignored
 let pillTimer = null, videoTopTimer = null, webHintTimer = null;
 
 // photo / audio / video all keep the Cast player running underneath (it owns the LOAD);
@@ -476,6 +486,8 @@ setInterval(() => {
   const now = pm.getCurrentTimeSec(), total = pm.getDurationSec();
   const state = pm.getPlayerState();
   const playing = state === cast.framework.messages.PlayerState.PLAYING;
+  if (state === cast.framework.messages.PlayerState.PLAYING ||
+      state === cast.framework.messages.PlayerState.PAUSED) setMediaLoading(false);
 
   if (mode === 'audio') {
     audioProgress.style.width = (total > 0 ? Math.min(100, now / total * 100) : 0) + '%';
@@ -515,6 +527,7 @@ if (params.has('src')) {
   // ---- Photos / videos / audio (normal Cast LOAD) ----
   playerManager.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, (request) => {
     stop();                                   // end any mirror
+    loadCount++;
     const media = request.media || {};
     mediaKind = kindOf(media);
     setMode(mediaKind);
@@ -525,15 +538,30 @@ if (params.has('src')) {
       audioNow.textContent = '0:00'; audioEnd.textContent = '0:00';
     }
     if (mediaKind === 'video') { videoTitle.textContent = titleOf(media); videoTopTimer = null; showVideoTitle(false); }
+    setMediaLoading(mediaKind === 'video');   // black loading screen until the new video plays
     return request;
   });
 
   // Stop Casting in the app / media finished → back to the ready screen
   playerManager.addEventListener(cast.framework.events.EventType.REQUEST_STOP, () => {
-    if (mode === 'photo' || mode === 'audio' || mode === 'video') setMode('idle');
+    const loadAtStop = loadCount;
+    setTimeout(() => {
+      if (loadAtStop !== loadCount) return;   // a new item arrived right after → keep showing media
+      if (mode === 'photo' || mode === 'audio' || mode === 'video') { setMediaLoading(false); setMode('idle'); }
+    }, 500);
   });
-  playerManager.addEventListener(cast.framework.events.EventType.MEDIA_FINISHED, () => {
-    if (mode === 'audio' || mode === 'video') setMode('idle');
+  // Player is really showing the new video → remove the loading screen right away
+  playerManager.addEventListener(cast.framework.events.EventType.PLAYING, () => setMediaLoading(false));
+  // Only a video / song that really played to its end returns to the ready screen.
+  // When the app sends the NEXT item, the old one "finishes" as INTERRUPTED — ignore that,
+  // otherwise the ready screen would cover the new video (short videos hit this a lot).
+  playerManager.addEventListener(cast.framework.events.EventType.MEDIA_FINISHED, (event) => {
+    const loadAtFinish = loadCount;
+    if (event && event.endedReason && event.endedReason !== 'END_OF_STREAM') return;
+    setTimeout(() => {
+      if (loadAtFinish !== loadCount) return;   // a new item was loaded meanwhile
+      if (mode === 'audio' || mode === 'video') setMode('idle');
+    }, 300);
   });
   // Seeking / pausing a video brings the title back briefly
   playerManager.addEventListener(cast.framework.events.EventType.SEEKED, () => {
