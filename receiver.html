@@ -247,12 +247,20 @@ function stop() {
   video.load();
 }
 
-async function start(url) {
+// Quiet retries after the stream drops (a short Wi-Fi hiccup). When the iPhone stopped
+// broadcasting the server is gone, so after these the TV just stays on the ready screen.
+const MAX_RETRIES = 3;
+let retries = 0;
+
+async function start(url, silent) {
   stop();
   const id = session;
   reportedPlaying = false;
-  show('Connecting to iPhone…');
-  report('CONNECTING');
+  if (!silent) {
+    retries = 0;
+    show('Connecting to iPhone…');
+    report('CONNECTING');
+  }
 
   try {
     const response = await fetch(url, { cache: 'no-store' });
@@ -269,6 +277,8 @@ async function start(url) {
       codec = codecFrom(head) || (head.length > 65536 ? 'avc1.64001F' : null);
     }
     if (id !== session) return reader.cancel();
+    if (mode !== 'mirror') setMode('mirror');   // a quiet retry got the stream back
+    show('');
 
     const mediaSource = new MediaSource();
     video.src = URL.createObjectURL(mediaSource);
@@ -315,12 +325,17 @@ async function start(url) {
   }
 }
 
+// Stream dropped / iPhone stopped broadcasting → straight back to the ready screen (no error text),
+// trying a few times in the background in case it was only a short drop.
 function retry(url, reason) {
+  console.log('Mirror stream stopped:', reason);
   const id = session;
-  show('Reconnecting… (' + reason + ')');
   reportedPlaying = false;
-  report('RECONNECTING');
-  setTimeout(() => { if (id === session) start(url); }, 1000);
+  show('');
+  if (mode === 'mirror') { setMode('idle'); report('ENDED'); }
+  if (retries >= MAX_RETRIES) { stop(); return; }
+  retries++;
+  setTimeout(() => { if (id === session) start(url, true); }, 1500);
 }
 
 // Drops video that has already been played so the buffer stays small on the TV.
@@ -351,6 +366,7 @@ setInterval(() => {
   if (video.paused) video.play().catch(() => {});
   if (video.currentTime > 0 && !video.paused && !reportedPlaying) {
     reportedPlaying = true;
+    retries = 0;
     show('');
     report('PLAYING');
   }
