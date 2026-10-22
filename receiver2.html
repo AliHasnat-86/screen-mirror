@@ -1,0 +1,626 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>TV Cast Chrome</title>
+<!--
+  TV Cast Chrome custom Cast receiver. Register this page's URL as a Custom Receiver in the
+  Google Cast Developer Console and put its App ID in MirrorSession.receiverAppID.
+
+  One page, one visible mode at a time:
+    idle    – branded "ready to cast" screen
+    mirror  – iPhone screen mirroring. The iPhone sends {"type":"START","url":"http://<phone>:8080/…/live.mp4"}
+              on urn:x-cast:com.screenmirror; the endless fragmented MP4 goes straight into Media Source
+              Extensions and stays a fraction of a second behind live. {"type":"STOP"} ends it.
+    photo   – Cast LOAD with an image/* content type (custom full-screen viewer)
+    audio   – Cast LOAD with an audio/* content type (custom now-playing screen)
+    video   – Cast LOAD with any other content type (cast-media-player + title overlay)
+    web     – {"type":"WEB","url":"https://…","title":"…"} shows the page full screen
+              (some sites refuse to be framed and stay blank).
+
+  Desktop test: receiver.html?src=http://<phone>:8080/live.mp4&lag=0.1&stats
+-->
+<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<style>
+  :root {
+    --accent: #F07026;
+    --accent-deep: #D92E1A;
+    --gold: #FCB038;
+    --bg: #0D0A0A;
+    --surface: rgba(255,255,255,0.06);
+    --text: #FFFFFF;
+    --muted: rgba(255,255,255,0.55);
+    --font: "Google Sans", "Roboto", system-ui, -apple-system, sans-serif;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; color: var(--text); font-family: var(--font); }
+  .layer { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; visibility: hidden; transition: opacity .45s ease, visibility 0s linear .45s; }
+  .layer.visible { opacity: 1; visibility: visible; transition: opacity .45s ease; }
+
+  /* ---------- Idle ---------- */
+  #idle { display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--bg); overflow: hidden; }
+  /* Slowly drifting warm glows behind everything */
+  .glow { position: absolute; border-radius: 50%; filter: blur(140px); opacity: .55; }
+  .glow.a { width: 900px; height: 900px; left: -260px; top: -320px; background: radial-gradient(circle, #F07026 0%, transparent 70%); animation: drift 18s ease-in-out infinite alternate; }
+  .glow.b { width: 800px; height: 800px; right: -240px; bottom: -340px; background: radial-gradient(circle, #D92E1A 0%, transparent 70%); animation: drift 22s ease-in-out infinite alternate-reverse; }
+  .glow.c { width: 520px; height: 520px; left: 55%; top: 10%; background: radial-gradient(circle, #FCB038 0%, transparent 70%); opacity: .18; animation: drift 26s ease-in-out infinite alternate; }
+  @keyframes drift { from { transform: translate(0,0) scale(1); } to { transform: translate(120px,80px) scale(1.15); } }
+  /* Fine grid for depth */
+  .grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+          background-size: 64px 64px; -webkit-mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%); mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%); }
+
+  .hero { position: relative; display: flex; flex-direction: column; align-items: center; z-index: 1; }
+  .orbit { position: relative; width: 340px; height: 340px; margin-bottom: 44px; display: flex; align-items: center; justify-content: center; }
+  .orbit .ring { position: absolute; inset: 0; border-radius: 50%; border: 2px dashed rgba(240,112,38,.35); animation: spinring 30s linear infinite; }
+  .orbit .ring.inner { inset: 40px; border-style: solid; border-color: rgba(252,176,56,.18); animation-duration: 18s; animation-direction: reverse; }
+  .orbit .dot { position: absolute; top: -7px; left: 50%; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 22px var(--gold); }
+  @keyframes spinring { to { transform: rotate(360deg); } }
+  .pulse { position: absolute; inset: 70px; border-radius: 56px; border: 2px solid rgba(240,112,38,.5); animation: pulse 3s ease-out infinite; }
+  .pulse:nth-of-type(2) { animation-delay: 1.5s; }
+  @keyframes pulse { from { transform: scale(.85); opacity: .9; } to { transform: scale(1.45); opacity: 0; } }
+  .appicon { position: relative; width: 180px; height: 180px; border-radius: 48px; display: flex; align-items: center; justify-content: center;
+             background: linear-gradient(145deg, #F07026 0%, #D92E1A 100%); box-shadow: 0 30px 80px rgba(217,46,26,.45), 0 0 120px rgba(240,112,38,.45), inset 0 2px 0 rgba(255,255,255,.35);
+             animation: float 5s ease-in-out infinite; }
+  .appicon svg { width: 104px; height: 104px; }
+  @keyframes float { 50% { transform: translateY(-14px); } }
+
+  #idle h1 { margin: 0; font-size: 76px; font-weight: 800; letter-spacing: -1px;
+             background: linear-gradient(90deg, #FFFFFF 0%, #FFD9B8 50%, #FCB038 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .status { margin-top: 22px; display: flex; align-items: center; gap: 14px; padding: 12px 26px; border-radius: 40px;
+            background: var(--surface); border: 1px solid rgba(255,255,255,.08); font-size: 26px; color: rgba(255,255,255,.85); backdrop-filter: blur(10px); }
+  .status i { width: 14px; height: 14px; border-radius: 50%; background: #34C759; box-shadow: 0 0 14px #34C759; animation: blink 2s ease-in-out infinite; }
+  #idleText { margin: 26px 0 0; font-size: 26px; color: var(--muted); }
+  .chips { margin-top: 44px; display: flex; gap: 18px; }
+  .chip { display: flex; align-items: center; gap: 12px; padding: 16px 26px; border-radius: 22px; background: var(--surface); border: 1px solid rgba(255,255,255,.07);
+          font-size: 22px; font-weight: 600; color: rgba(255,255,255,.9); }
+  .chip svg { width: 28px; height: 28px; }
+  .chip:nth-child(1) svg { color: #F07026; } .chip:nth-child(2) svg { color: #8BD450; } .chip:nth-child(3) svg { color: #FF9F43; }
+  .chip:nth-child(4) svg { color: #3FC8F5; } .chip:nth-child(5) svg { color: #B48CFF; }
+  #clock { position: absolute; top: 48px; right: 64px; font-size: 40px; font-weight: 600; color: rgba(255,255,255,.75); z-index: 1; }
+  .brandmark { position: absolute; top: 52px; left: 64px; display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight: 700; color: rgba(255,255,255,.85); z-index: 1; }
+  .brandmark b { width: 36px; height: 36px; border-radius: 11px; background: linear-gradient(145deg, #F07026, #D92E1A); display: flex; align-items: center; justify-content: center; }
+  .brandmark b svg { width: 22px; height: 22px; }
+
+  /* ---------- Mirror ---------- */
+  #mirror { background: #000; }
+  #video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+  #message { position: absolute; left: 0; right: 0; bottom: 64px; text-align: center; color: #9a9a9a; font: 28px/1.4 var(--font); }
+  #stats { position: absolute; top: 16px; right: 24px; color: #6f6; font: 16px monospace; display: none; }
+
+  /* ---------- Media (cast-media-player) ---------- */
+  #media { background: #000; }
+  cast-media-player { position: absolute; inset: 0; --background-color: #000; --theme-hue: 20; --progress-color: var(--accent); --font-family: var(--font);
+                      --splash-image: none; --logo-image: none; --background-image: none; }
+  /* Shown while a new video loads, so rapid switching never reveals an idle / ready page */
+  #mediaLoading { position: absolute; inset: 0; z-index: 4; background: #000; display: none;
+                  flex-direction: column; align-items: center; justify-content: center; gap: 28px; }
+  #mediaLoading.shown { display: flex; }
+  #mediaLoading .label { font-size: 28px; color: var(--muted); }
+
+  /* ---------- Photo ---------- */
+  #photo { background: #000; overflow: hidden; }
+  #photoBlur { position: absolute; inset: -60px; background-size: cover; background-position: center; filter: blur(48px) brightness(.45); transform: scale(1.1); }
+  #photoImg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transform: scale(1.03); transition: opacity .6s ease, transform 6s ease-out; }
+  #photoImg.shown { opacity: 1; transform: scale(1); }
+
+  /* ---------- Audio ---------- */
+  #audio { display: flex; align-items: center; justify-content: center; gap: 96px;
+           background: radial-gradient(ellipse at 30% 40%, #4a1a0c 0%, #1a0d09 50%, var(--bg) 85%); }
+  .art { width: 420px; height: 420px; border-radius: 36px; background: linear-gradient(135deg, #FCB038, #F07026 45%, #D92E1A);
+         display: flex; align-items: center; justify-content: center; box-shadow: 0 40px 120px rgba(0,0,0,.6), 0 0 110px rgba(240,112,38,.35); }
+  .art svg { width: 170px; height: 170px; opacity: .95; }
+  .now { width: 760px; }
+  .now .label { font-size: 26px; letter-spacing: 3px; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+  #audioTitle { margin: 16px 0 6px; font-size: 64px; font-weight: 700; line-height: 1.15; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  #audioArtist { font-size: 30px; color: var(--muted); }
+  .eq { display: flex; align-items: flex-end; gap: 10px; height: 64px; margin: 44px 0 36px; }
+  .eq span { width: 12px; height: 16px; border-radius: 6px; background: var(--accent); }
+  .eq.playing span { animation: eq 1s ease-in-out infinite; }
+  .eq span:nth-child(2) { animation-delay: .15s; } .eq span:nth-child(3) { animation-delay: .35s; }
+  .eq span:nth-child(4) { animation-delay: .05s; } .eq span:nth-child(5) { animation-delay: .25s; }
+  @keyframes eq { 0%,100% { height: 14px; } 50% { height: 64px; } }
+
+  /* Shared progress bar (audio + video) */
+  .bar { height: 8px; border-radius: 4px; background: rgba(255,255,255,.18); overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--gold), var(--accent)); border-radius: 4px; transition: width .5s linear; }
+  .times { display: flex; justify-content: space-between; margin-top: 14px; font-size: 24px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* ---------- Video title overlay ---------- */
+  #videoTop { position: absolute; left: 0; right: 0; top: 0; padding: 48px 72px 120px; background: linear-gradient(rgba(0,0,0,.75), transparent);
+              opacity: 0; transition: opacity .5s ease; pointer-events: none; z-index: 5; }
+  #videoTop.shown { opacity: 1; }
+  #videoTitle { font-size: 42px; font-weight: 600; }
+  .brand { font-size: 24px; color: var(--muted); margin-top: 6px; }
+
+  /* ---------- Badges ---------- */
+  .pill { position: absolute; top: 44px; left: 56px; display: flex; align-items: center; gap: 12px; padding: 12px 22px; border-radius: 40px;
+          background: rgba(0,0,0,.55); font-size: 24px; font-weight: 600; letter-spacing: 1px; transition: opacity .6s ease; z-index: 5; }
+  .pill i { width: 14px; height: 14px; border-radius: 50%; background: #ff3b30; animation: blink 1.2s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .3; } }
+
+  /* ---------- Web ---------- */
+  #web { background: #fff; }
+  #webBar { position: absolute; left: 0; right: 0; top: 0; height: 72px; padding: 0 40px; display: flex; align-items: center; gap: 18px;
+            background: #1a0f0b; color: #fff; font-size: 26px; z-index: 2; }
+  #webBar svg { width: 30px; height: 30px; flex: none; }
+  #webTitle { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+  #webBar .brand { margin: 0; }
+  #webFrame { position: absolute; left: 0; right: 0; top: 72px; bottom: 0; width: 100%; height: calc(100% - 72px); border: 0; background: #fff; }
+  #webLoading { position: absolute; inset: 72px 0 0 0; display: flex; align-items: center; justify-content: center; background: #1a0f0b; z-index: 1; }
+  .spinner { width: 72px; height: 72px; border-radius: 50%; border: 6px solid rgba(255,255,255,.15); border-top-color: var(--accent); animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #webHint { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); padding: 14px 28px; border-radius: 30px; background: rgba(26,15,11,.92);
+             color: #fff; font-size: 22px; opacity: 0; transition: opacity .6s ease; z-index: 3; white-space: nowrap; }
+  #webHint.shown { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- Idle -->
+<div id="idle" class="layer visible">
+  <div class="glow a"></div><div class="glow b"></div><div class="glow c"></div>
+  <div class="grid"></div>
+  <div class="brandmark"><b><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="15" height="11" rx="2"/><path d="M6 19h7M9.5 15v4"/><rect x="15" y="9" width="7" height="12" rx="1.6" fill="#D92E1A"/><path d="M17.3 18.6a1.4 1.4 0 0 1 1.4 1.4M17.3 16.6a3.4 3.4 0 0 1 3.4 3.4"/></svg></b>TV Cast Chrome</div>
+  <div id="clock"></div>
+  <div class="hero">
+    <div class="orbit">
+      <div class="ring"><div class="dot"></div></div>
+      <div class="ring inner"></div>
+      <div class="pulse"></div><div class="pulse"></div>
+      <div class="appicon"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="15" height="11" rx="2"/><path d="M6 19h7M9.5 15v4"/><rect x="15" y="9" width="7" height="12" rx="1.6" fill="#D92E1A"/><path d="M17.3 18.6a1.4 1.4 0 0 1 1.4 1.4M17.3 16.6a3.4 3.4 0 0 1 3.4 3.4"/></svg></div>
+    </div>
+    <h1>TV Cast Chrome</h1>
+    <div class="status"><i></i>Connected · Ready to cast</div>
+    <p id="idleText">Pick something on your iPhone to show it here</p>
+    <div class="chips">
+      <div class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>Screen Mirroring</div>
+      <div class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>Photos</div>
+      <div class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3z"/></svg>Videos</div>
+      <div class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>Music</div>
+      <div class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 8a2 2 0 0 1 2-2h2l2-2h6l2 2h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="4"/></svg>Live Camera</div>
+    </div>
+  </div>
+</div>
+
+<!-- Screen mirroring -->
+<div id="mirror" class="layer">
+  <video id="video" muted autoplay playsinline></video>
+  <div class="pill" id="livePill"><i></i>LIVE · iPhone</div>
+  <div id="message"></div>
+  <div id="stats"></div>
+</div>
+
+<!-- Photos / videos / audio (Cast media player) -->
+<div id="media" class="layer">
+  <cast-media-player id="player"></cast-media-player>
+  <div id="mediaLoading"><div class="spinner"></div><div class="label">Loading…</div></div>
+  <div id="videoTop"><div id="videoTitle"></div><div class="brand">TV Cast Chrome</div></div>
+</div>
+
+<!-- Photo viewer -->
+<div id="photo" class="layer">
+  <div id="photoBlur"></div>
+  <img id="photoImg" alt="">
+</div>
+
+<!-- Audio now playing -->
+<div id="audio" class="layer">
+  <div class="art"><svg viewBox="0 0 24 24" fill="#fff"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg></div>
+  <div class="now">
+    <div class="label">Now playing</div>
+    <div id="audioTitle">Audio</div>
+    <div id="audioArtist">TV Cast Chrome</div>
+    <div class="eq" id="eq"><span></span><span></span><span></span><span></span><span></span></div>
+    <div class="bar"><div id="audioProgress"></div></div>
+    <div class="times"><span id="audioNow">0:00</span><span id="audioEnd">0:00</span></div>
+  </div>
+</div>
+
+<!-- Web page -->
+<div id="web" class="layer">
+  <div id="webBar">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#F07026" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></svg>
+    <div id="webTitle"></div>
+    <div class="brand">TV Cast Chrome · Web Cast</div>
+  </div>
+  <div id="webLoading"><div class="spinner"></div></div>
+  <iframe id="webFrame" allow="autoplay; fullscreen; encrypted-media; picture-in-picture"></iframe>
+  <div id="webHint">If the page stays blank, this website doesn't allow being shown on a TV.</div>
+</div>
+
+<script>
+const NAMESPACE = 'urn:x-cast:com.screenmirror';
+
+// Playback stays this far (seconds) behind the newest buffered frame. The sender picks it in
+// START as "lag": a per-frame stream can sit at about 0.1 s, a stream of half-second segments
+// needs 0.6 s or it stalls between segments. The other thresholds scale from it.
+const DEFAULT_LAG = 0.6;
+let targetLag = DEFAULT_LAG;  // where a jump lands
+let speedupLag = 1.1;         // above this, play slightly fast to catch up
+let jumpLag = 2.0;            // above this, jump straight to targetLag
+const KEEP_BEHIND = 4;        // seconds of already-played video kept in the buffer
+
+function setLag(lag) {
+  targetLag = lag > 0 && lag < 5 ? lag : DEFAULT_LAG;
+  speedupLag = targetLag + Math.max(0.08, targetLag * 0.6);
+  jumpLag = targetLag + Math.max(0.6, targetLag * 2.3);
+}
+
+const video = document.getElementById('video');
+const message = document.getElementById('message');
+const stats = document.getElementById('stats');
+const params = new URLSearchParams(location.search);
+if (params.has('stats')) stats.style.display = 'block';
+
+let session = 0;
+let current = null; // { id, reader, mediaSource, sourceBuffer, queue }
+let context = null;
+let reportedPlaying = false;
+
+// Tells connected senders what the player is doing: CONNECTING, PLAYING or RECONNECTING.
+function report(state) {
+  if (!context) return;
+  try { context.sendCustomMessage(NAMESPACE, undefined, { type: 'STATE', state }); } catch (e) {}
+}
+
+function show(text) {
+  message.textContent = text;
+  message.style.display = text ? 'block' : 'none';
+}
+
+function concat(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+// Reads the H.264 codec string ("avc1.PPCCLL") from the avcC box of the init segment.
+function codecFrom(bytes) {
+  for (let i = 0; i + 8 < bytes.length; i++) {
+    if (bytes[i] === 0x61 && bytes[i + 1] === 0x76 && bytes[i + 2] === 0x63 && bytes[i + 3] === 0x43) {
+      const hex = (n) => n.toString(16).padStart(2, '0').toUpperCase();
+      return 'avc1.' + hex(bytes[i + 5]) + hex(bytes[i + 6]) + hex(bytes[i + 7]);
+    }
+  }
+  return null;
+}
+
+function stop() {
+  session++;
+  if (current) {
+    try { current.reader.cancel(); } catch (e) {}
+    current = null;
+  }
+  video.removeAttribute('src');
+  video.load();
+}
+
+async function start(url) {
+  stop();
+  const id = session;
+  reportedPlaying = false;
+  show('Connecting to iPhone…');
+  report('CONNECTING');
+
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const reader = response.body.getReader();
+
+    // Read until the init segment has told us the codec.
+    let head = new Uint8Array(0);
+    let codec = null;
+    while (!codec) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error('stream ended');
+      head = concat(head, value);
+      codec = codecFrom(head) || (head.length > 65536 ? 'avc1.64001F' : null);
+    }
+    if (id !== session) return reader.cancel();
+
+    const mediaSource = new MediaSource();
+    video.src = URL.createObjectURL(mediaSource);
+    await new Promise((resolve) => mediaSource.addEventListener('sourceopen', resolve, { once: true }));
+    if (id !== session) return reader.cancel();
+
+    const sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="' + codec + '"');
+    sourceBuffer.mode = 'segments';
+    const queue = [head];
+    current = { id, reader, mediaSource, sourceBuffer, queue };
+
+    let lastTrim = 0;
+    const pump = () => {
+      if (id !== session || sourceBuffer.updating) return;
+      // Frames arrive ~30 times a second, so the buffer is rarely idle: trim in the gaps.
+      if (!queue.length) {
+        if (performance.now() - lastTrim > 2000) { lastTrim = performance.now(); trim(false); }
+        return;
+      }
+      const chunk = queue.shift();
+      try {
+        sourceBuffer.appendBuffer(chunk);
+      } catch (e) {
+        if (e.name === 'QuotaExceededError') {
+          queue.unshift(chunk);
+          trim(true);
+        } else {
+          throw e;
+        }
+      }
+    };
+    sourceBuffer.addEventListener('updateend', pump);
+    pump();
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done || id !== session) break;
+      queue.push(value);
+      pump();
+    }
+    if (id === session) retry(url, 'Stream ended');
+  } catch (e) {
+    if (id === session) retry(url, e.message || String(e));
+  }
+}
+
+function retry(url, reason) {
+  const id = session;
+  show('Reconnecting… (' + reason + ')');
+  reportedPlaying = false;
+  report('RECONNECTING');
+  setTimeout(() => { if (id === session) start(url); }, 1000);
+}
+
+// Drops video that has already been played so the buffer stays small on the TV.
+function trim(force) {
+  const sb = current && current.sourceBuffer;
+  if (!sb || sb.updating || !video.buffered.length) return;
+  const start = video.buffered.start(0);
+  const cutoff = video.currentTime - (force ? 1 : KEEP_BEHIND);
+  if (cutoff > start + 1) {
+    try { sb.remove(start, cutoff); } catch (e) {}
+  }
+}
+
+// Keeps playback just behind the newest frame.
+setInterval(() => {
+  const buffered = video.buffered;
+  if (!buffered.length) return;
+  const end = buffered.end(buffered.length - 1);
+  const lastStart = buffered.start(buffered.length - 1);
+  let lag = end - video.currentTime;
+
+  if (video.currentTime < lastStart || lag > jumpLag) {
+    video.currentTime = Math.max(lastStart, end - targetLag);
+    lag = end - video.currentTime;
+  }
+  const rate = lag > speedupLag ? 1.1 : 1.0;
+  if (video.playbackRate !== rate) video.playbackRate = rate;
+  if (video.paused) video.play().catch(() => {});
+  if (video.currentTime > 0 && !video.paused && !reportedPlaying) {
+    reportedPlaying = true;
+    show('');
+    report('PLAYING');
+  }
+
+  stats.textContent = 'lag ' + lag.toFixed(2) + 's  rate ' + rate.toFixed(2) +
+    '  buf ' + (end - buffered.start(0)).toFixed(1) + 's';
+}, 50);
+
+// =====================================================================================
+//  TV Cast Chrome: modes, media screens, web cast
+// =====================================================================================
+const layers = {
+  idle: document.getElementById('idle'),
+  mirror: document.getElementById('mirror'),
+  media: document.getElementById('media'),
+  photo: document.getElementById('photo'),
+  audio: document.getElementById('audio'),
+  web: document.getElementById('web'),
+};
+const livePill = document.getElementById('livePill');
+const photoImg = document.getElementById('photoImg');
+const photoBlur = document.getElementById('photoBlur');
+const audioTitle = document.getElementById('audioTitle');
+const audioProgress = document.getElementById('audioProgress');
+const audioNow = document.getElementById('audioNow');
+const audioEnd = document.getElementById('audioEnd');
+const eq = document.getElementById('eq');
+const videoTop = document.getElementById('videoTop');
+const videoTitle = document.getElementById('videoTitle');
+const webFrame = document.getElementById('webFrame');
+const webTitle = document.getElementById('webTitle');
+const webLoading = document.getElementById('webLoading');
+const webHint = document.getElementById('webHint');
+const clock = document.getElementById('clock');
+const mediaLoading = document.getElementById('mediaLoading');
+function setMediaLoading(on) { mediaLoading.classList.toggle('shown', on); }
+
+let mode = 'idle';
+let mediaKind = null;      // 'photo' | 'audio' | 'video'
+let loadCount = 0;         // increases with every LOAD; stale events from older media are ignored
+let pillTimer = null, videoTopTimer = null, webHintTimer = null;
+
+// photo / audio / video all keep the Cast player running underneath (it owns the LOAD);
+// photo and audio cover it with their own full-screen design.
+function setMode(next) {
+  mode = next;
+  const visible = {
+    idle: next === 'idle',
+    mirror: next === 'mirror',
+    media: next === 'photo' || next === 'audio' || next === 'video',
+    photo: next === 'photo',
+    audio: next === 'audio',
+    web: next === 'web',
+  };
+  for (const key in layers) layers[key].classList.toggle('visible', visible[key]);
+  if (next !== 'web') { webFrame.removeAttribute('src'); webHint.classList.remove('shown'); }
+  if (next !== 'mirror') show('');
+  if (next === 'mirror') flashPill();
+  if (next !== 'video') videoTop.classList.remove('shown');
+}
+
+function flashPill() {
+  livePill.style.opacity = '1';
+  clearTimeout(pillTimer);
+  pillTimer = setTimeout(() => { livePill.style.opacity = '0'; }, 5000);
+}
+
+function stopMedia() {
+  try {
+    const pm = context && context.getPlayerManager();
+    if (pm && pm.getPlayerState() !== cast.framework.messages.PlayerState.IDLE) pm.stop();
+  } catch (e) {}
+}
+
+function fmt(sec) {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  const s = Math.floor(sec % 60), m = Math.floor(sec / 60) % 60, h = Math.floor(sec / 3600);
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+}
+
+function titleOf(media) {
+  const meta = media && media.metadata;
+  if (meta && meta.title) return meta.title;
+  const url = media && (media.contentUrl || media.contentId) || '';
+  return decodeURIComponent(url.split('/').pop().split('?')[0] || 'Media');
+}
+
+function kindOf(media) {
+  const type = (media && media.contentType || '').toLowerCase();
+  if (type.startsWith('image/')) return 'photo';
+  if (type.startsWith('audio/')) return 'audio';
+  return 'video';
+}
+
+function showPhoto(url) {
+  photoImg.classList.remove('shown');
+  photoImg.onload = () => setTimeout(() => photoImg.classList.add('shown'), 30);
+  photoImg.src = url;
+  if (photoImg.complete && photoImg.naturalWidth) photoImg.onload();   // already cached
+  photoBlur.style.backgroundImage = 'url("' + url + '")';
+}
+
+function showVideoTitle(keep) {
+  videoTop.classList.add('shown');
+  clearTimeout(videoTopTimer);
+  if (!keep) videoTopTimer = setTimeout(() => videoTop.classList.remove('shown'), 4000);
+}
+
+function openWeb(url, title) {
+  webTitle.textContent = title || url.replace(/^https?:\/\//, '').split('/')[0];
+  webLoading.style.display = 'flex';
+  webHint.classList.remove('shown');
+  clearTimeout(webHintTimer);
+  webFrame.onload = () => {
+    webLoading.style.display = 'none';
+    webHint.classList.add('shown');
+    webHintTimer = setTimeout(() => webHint.classList.remove('shown'), 7000);
+  };
+  webFrame.src = url;
+}
+
+// Clock on the idle screen
+function tick() {
+  const d = new Date();
+  clock.textContent = d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+tick(); setInterval(tick, 10000);
+
+// Progress / state for the audio and video screens
+setInterval(() => {
+  if (!context || (mode !== 'audio' && mode !== 'video')) return;
+  const pm = context.getPlayerManager();
+  const now = pm.getCurrentTimeSec(), total = pm.getDurationSec();
+  const state = pm.getPlayerState();
+  const playing = state === cast.framework.messages.PlayerState.PLAYING;
+  if (state === cast.framework.messages.PlayerState.PLAYING ||
+      state === cast.framework.messages.PlayerState.PAUSED) setMediaLoading(false);
+
+  if (mode === 'audio') {
+    audioProgress.style.width = (total > 0 ? Math.min(100, now / total * 100) : 0) + '%';
+    audioNow.textContent = fmt(now);
+    audioEnd.textContent = fmt(total);
+    eq.classList.toggle('playing', playing);
+  } else if (!playing) {
+    showVideoTitle(true);   // keep the title visible while paused / buffering
+  } else if (videoTop.classList.contains('shown') && !videoTopTimer) {
+    showVideoTitle(false);
+  }
+}, 500);
+
+if (params.has('src')) {
+  setLag(parseFloat(params.get('lag')));
+  setMode('mirror');
+  start(params.get('src'));
+} else if (window.cast && cast.framework) {
+  context = cast.framework.CastReceiverContext.getInstance();
+  const playerManager = context.getPlayerManager();
+
+  // ---- Mirror + Web Cast (custom namespace) ----
+  context.addCustomMessageListener(NAMESPACE, (event) => {
+    const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+    if (data.type === 'START' && data.url) {
+      stopMedia(); setMode('mirror');
+      setLag(parseFloat(data.lag)); start(data.url);
+    }
+    if (data.type === 'STOP') { stop(); stopMedia(); setMode('idle'); }
+    if (data.type === 'WEB' && data.url) {
+      stop(); stopMedia();
+      setMode('web');
+      openWeb(data.url, data.title);
+    }
+  });
+
+  // ---- Photos / videos / audio (normal Cast LOAD) ----
+  playerManager.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, (request) => {
+    stop();                                   // end any mirror
+    loadCount++;
+    const media = request.media || {};
+    mediaKind = kindOf(media);
+    setMode(mediaKind);
+    if (mediaKind === 'photo') showPhoto(media.contentUrl || media.contentId);
+    if (mediaKind === 'audio') {
+      audioTitle.textContent = titleOf(media);
+      audioProgress.style.width = '0%';
+      audioNow.textContent = '0:00'; audioEnd.textContent = '0:00';
+    }
+    if (mediaKind === 'video') { videoTitle.textContent = titleOf(media); videoTopTimer = null; showVideoTitle(false); }
+    setMediaLoading(mediaKind === 'video');   // black loading screen until the new video plays
+    return request;
+  });
+
+  // Stop Casting in the app / media finished → back to the ready screen
+  playerManager.addEventListener(cast.framework.events.EventType.REQUEST_STOP, () => {
+    const loadAtStop = loadCount;
+    setTimeout(() => {
+      if (loadAtStop !== loadCount) return;   // a new item arrived right after → keep showing media
+      if (mode === 'photo' || mode === 'audio' || mode === 'video') { setMediaLoading(false); setMode('idle'); }
+    }, 500);
+  });
+  // Player is really showing the new video → remove the loading screen right away
+  playerManager.addEventListener(cast.framework.events.EventType.PLAYING, () => setMediaLoading(false));
+  // Only a video / song that really played to its end returns to the ready screen.
+  // When the app sends the NEXT item, the old one "finishes" as INTERRUPTED — ignore that,
+  // otherwise the ready screen would cover the new video (short videos hit this a lot).
+  playerManager.addEventListener(cast.framework.events.EventType.MEDIA_FINISHED, (event) => {
+    const loadAtFinish = loadCount;
+    if (event && event.endedReason && event.endedReason !== 'END_OF_STREAM') return;
+    setTimeout(() => {
+      if (loadAtFinish !== loadCount) return;   // a new item was loaded meanwhile
+      if (mode === 'audio' || mode === 'video') setMode('idle');
+    }, 300);
+  });
+  // Seeking / pausing a video brings the title back briefly
+  playerManager.addEventListener(cast.framework.events.EventType.SEEKED, () => {
+    if (mode === 'video') { videoTopTimer = null; showVideoTitle(false); }
+  });
+
+  const options = new cast.framework.CastReceiverOptions();
+  options.disableIdleTimeout = true;
+  options.customNamespaces = { [NAMESPACE]: cast.framework.system.MessageType.JSON };
+  context.start(options);
+}
+</script>
+</body>
+</html>
