@@ -20,7 +20,18 @@
 
   Desktop test: receiver.html?src=http://<phone>:8080/live.mp4&lag=0.1&stats
 -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<script>
+  // Sizes in this page are designed for a 1920×1080 screen. Chromecasts usually lay pages out
+  // at 1280×720, so zoom the whole page to fit whatever size the TV really uses.
+  function fitToScreen() {
+    const scale = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+    document.documentElement.style.zoom = scale;
+  }
+  fitToScreen();
+  window.addEventListener('resize', fitToScreen);
+</script>
 <style>
   :root {
     --accent: #F07026;
@@ -49,34 +60,34 @@
           background-size: 64px 64px; -webkit-mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%); mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%); }
 
   .hero { position: relative; display: flex; flex-direction: column; align-items: center; z-index: 1; }
-  .orbit { position: relative; width: 340px; height: 340px; margin-bottom: 44px; display: flex; align-items: center; justify-content: center; }
+  .orbit { position: relative; width: 250px; height: 250px; margin-bottom: 30px; display: flex; align-items: center; justify-content: center; }
   .orbit .ring { position: absolute; inset: 0; border-radius: 50%; border: 2px dashed rgba(240,112,38,.35); animation: spinring 30s linear infinite; }
-  .orbit .ring.inner { inset: 40px; border-style: solid; border-color: rgba(252,176,56,.18); animation-duration: 18s; animation-direction: reverse; }
+  .orbit .ring.inner { inset: 30px; border-style: solid; border-color: rgba(252,176,56,.18); animation-duration: 18s; animation-direction: reverse; }
   .orbit .dot { position: absolute; top: -7px; left: 50%; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 22px var(--gold); }
   @keyframes spinring { to { transform: rotate(360deg); } }
-  .pulse { position: absolute; inset: 70px; border-radius: 56px; border: 2px solid rgba(240,112,38,.5); animation: pulse 3s ease-out infinite; }
+  .pulse { position: absolute; inset: 55px; border-radius: 40px; border: 2px solid rgba(240,112,38,.5); animation: pulse 3s ease-out infinite; }
   .pulse:nth-of-type(2) { animation-delay: 1.5s; }
   @keyframes pulse { from { transform: scale(.85); opacity: .9; } to { transform: scale(1.45); opacity: 0; } }
-  .appicon { position: relative; width: 180px; height: 180px; border-radius: 48px; display: flex; align-items: center; justify-content: center;
+  .appicon { position: relative; width: 140px; height: 140px; border-radius: 38px; display: flex; align-items: center; justify-content: center;
              background: linear-gradient(145deg, #F07026 0%, #D92E1A 100%); box-shadow: 0 30px 80px rgba(217,46,26,.45), 0 0 120px rgba(240,112,38,.45), inset 0 2px 0 rgba(255,255,255,.35);
              animation: float 5s ease-in-out infinite; }
-  .appicon svg { width: 104px; height: 104px; }
-  @keyframes float { 50% { transform: translateY(-14px); } }
+  .appicon svg { width: 80px; height: 80px; }
+  @keyframes float { 50% { transform: translateY(-10px); } }
 
-  #idle h1 { margin: 0; font-size: 76px; font-weight: 800; letter-spacing: -1px;
+  #idle h1 { margin: 0; font-size: 60px; font-weight: 800; letter-spacing: -1px;
              background: linear-gradient(90deg, #FFFFFF 0%, #FFD9B8 50%, #FCB038 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
-  .status { margin-top: 22px; display: flex; align-items: center; gap: 14px; padding: 12px 26px; border-radius: 40px;
-            background: var(--surface); border: 1px solid rgba(255,255,255,.08); font-size: 26px; color: rgba(255,255,255,.85); backdrop-filter: blur(10px); }
-  .status i { width: 14px; height: 14px; border-radius: 50%; background: #34C759; box-shadow: 0 0 14px #34C759; animation: blink 2s ease-in-out infinite; }
-  #idleText { margin: 26px 0 0; font-size: 26px; color: var(--muted); }
-  .chips { margin-top: 44px; display: flex; gap: 18px; }
-  .chip { display: flex; align-items: center; gap: 12px; padding: 16px 26px; border-radius: 22px; background: var(--surface); border: 1px solid rgba(255,255,255,.07);
-          font-size: 22px; font-weight: 600; color: rgba(255,255,255,.9); }
-  .chip svg { width: 28px; height: 28px; }
+  .status { margin-top: 16px; display: flex; align-items: center; gap: 12px; padding: 10px 22px; border-radius: 40px;
+            background: var(--surface); border: 1px solid rgba(255,255,255,.08); color: rgba(255,255,255,.85); font-size: 22px; backdrop-filter: blur(10px); }
+  .status i { width: 12px; height: 12px; border-radius: 50%; background: #34C759; box-shadow: 0 0 14px #34C759; animation: blink 2s ease-in-out infinite; }
+  #idleText { margin: 18px 0 0; font-size: 22px; color: var(--muted); }
+  .chips { margin-top: 32px; display: flex; gap: 14px; }
+  .chip { display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-radius: 18px; background: var(--surface); border: 1px solid rgba(255,255,255,.07);
+          font-size: 19px; font-weight: 600; color: rgba(255,255,255,.9); }
+  .chip svg { width: 24px; height: 24px; }
   .chip:nth-child(1) svg { color: #F07026; } .chip:nth-child(2) svg { color: #8BD450; } .chip:nth-child(3) svg { color: #FF9F43; }
   .chip:nth-child(4) svg { color: #3FC8F5; } .chip:nth-child(5) svg { color: #B48CFF; }
-  #clock { position: absolute; top: 48px; right: 64px; font-size: 40px; font-weight: 600; color: rgba(255,255,255,.75); z-index: 1; }
-  .brandmark { position: absolute; top: 52px; left: 64px; display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight: 700; color: rgba(255,255,255,.85); z-index: 1; }
+  #clock { position: absolute; top: 44px; right: 60px; font-size: 34px; font-weight: 600; color: rgba(255,255,255,.75); z-index: 1; }
+  .brandmark { position: absolute; top: 46px; left: 60px; display: flex; align-items: center; gap: 12px; font-size: 24px; font-weight: 700; color: rgba(255,255,255,.85); z-index: 1; }
   .brandmark b { width: 36px; height: 36px; border-radius: 11px; background: linear-gradient(145deg, #F07026, #D92E1A); display: flex; align-items: center; justify-content: center; }
   .brandmark b svg { width: 22px; height: 22px; }
 
